@@ -44,6 +44,7 @@ typedef struct
     int     base_indent;            // controlled by the :indent option to Wikitext::Parser#parse
     int     current_indent;         // fluctuates according to currently nested structures
     str_t   *tabulation;            // caching buffer for emitting indentation
+    VALUE   parameters;
 } parser_t;
 
 const char escaped_no_wiki_start[]      = "&lt;nowiki&gt;";
@@ -120,6 +121,8 @@ const char literal_img_start[]          = "{{";
 const char img_start[]                  = "<img src=\"";
 const char img_end[]                    = "\" />";
 const char img_alt[]                    = "\" alt=\"";
+const char literal_parameter_start[]    = "{{{";
+const char literal_parameter_end[]    = "}}}";
 
 // for testing and debugging only
 VALUE Wikitext_parser_tokenize(VALUE self, VALUE string)
@@ -247,6 +250,25 @@ void _Wikitext_append_img(parser_t *parser, char *token_ptr, int token_len)
     rb_str_cat(parser->output, img_alt, sizeof(img_alt) - 1);       // " alt="
     rb_str_cat(parser->output, token_ptr, token_len);
     rb_str_cat(parser->output, img_end, sizeof(img_end) - 1);       // " />
+}
+
+void _Wikitext_include_parameter(parser_t *parser, char *token_ptr, int token_len)
+{
+    VALUE val = Qnil;
+    if (!NIL_P(parser->parameters)) {
+      VALUE key = rb_str_new2(token_ptr);
+      val = rb_funcall(parser->parameters, rb_intern("[]"), 1, key);
+    }
+
+    if (!NIL_P(val)) {
+      val = rb_funcall(val, rb_intern("to_s"), 0);
+      rb_str_append(parser->output, val);
+      return;
+    }
+
+    rb_str_cat(parser->output, literal_parameter_start, sizeof(literal_parameter_start) - 1);
+    rb_str_cat(parser->output, token_ptr, token_len);
+    rb_str_cat(parser->output, literal_parameter_end, sizeof(literal_parameter_start) - 1);
 }
 
 // will emit indentation only if we are about to emit any of:
@@ -908,6 +930,7 @@ VALUE Wikitext_parser_initialize(int argc, VALUE *argv, VALUE self)
     VALUE space_to_underscore           = Qfalse;
     VALUE treat_slash_as_special        = Qtrue;
     VALUE minimum_fulltext_token_length = INT2NUM(3);
+    VALUE parameters                    = Qnil;
 
     // process options hash (override defaults)
     if (!NIL_P(options) && TYPE(options) == T_HASH)
@@ -923,6 +946,7 @@ VALUE Wikitext_parser_initialize(int argc, VALUE *argv, VALUE self)
         space_to_underscore             = OVERRIDE_IF_SET(space_to_underscore);
         treat_slash_as_special          = OVERRIDE_IF_SET(treat_slash_as_special);
         minimum_fulltext_token_length   = OVERRIDE_IF_SET(minimum_fulltext_token_length);
+        parameters                      = OVERRIDE_IF_SET(parameters);
     }
 
     // no need to call super here; rb_call_super()
@@ -935,6 +959,7 @@ VALUE Wikitext_parser_initialize(int argc, VALUE *argv, VALUE self)
     rb_iv_set(self, "@space_to_underscore",             space_to_underscore);
     rb_iv_set(self, "@treat_slash_as_special",          treat_slash_as_special);
     rb_iv_set(self, "@minimum_fulltext_token_length",   minimum_fulltext_token_length);
+    rb_iv_set(self, "@parameters",                      parameters);
     return self;
 }
 
@@ -1009,6 +1034,7 @@ VALUE Wikitext_parser_parse(int argc, VALUE *argv, VALUE self)
     parser->base_indent             = base_indent;
     parser->current_indent          = 0;
     parser->tabulation              = str_new();
+    parser->parameters              = rb_iv_get(self, "@parameters");
     GC_WRAP_STR(parser->tabulation, tabulation_gc);
 
     token_t _token;
@@ -2419,6 +2445,50 @@ VALUE Wikitext_parser_parse(int argc, VALUE *argv, VALUE self)
                 for (i = 0, j = parser->scope->count; i < j; i++)
                     _Wikitext_pop_from_stack(parser, Qnil);
                 goto return_output; // break not enough here (want to break out of outer while loop, not inner switch statement)
+            case PARAMETER_START:
+                if (IN(NO_WIKI_START) || IN(PRE) || IN(PRE_START))
+                {
+                    _Wikitext_emit_pending_crlf_if_necessary(parser);
+                    rb_str_cat(parser->output, token->start, TOKEN_LEN(token));
+                }
+                else if (!NIL_P(parser->capture))
+                    rb_str_cat(parser->capture, token->start, TOKEN_LEN(token));
+                else
+                {
+                    // not currently capturing: will be emitting something on success or failure, so get ready
+                    _Wikitext_pop_excess_elements(parser);
+                    _Wikitext_start_para_if_necessary(parser);
+
+                    // scan ahead consuming PRINTABLE, ALNUM and SPECIAL_URI_CHARS tokens
+                    // will cheat here and abuse the link_target capture buffer to accumulate text
+                    if (NIL_P(parser->link_target))
+                        parser->link_target = rb_str_new2("");
+                    while (NEXT_TOKEN(), (type = token->type))
+                    {
+                        if (type == PRINTABLE || type == ALNUM || type == SPECIAL_URI_CHARS)
+                            rb_str_cat(parser->link_target, token->start, TOKEN_LEN(token));
+                        else if (type == PARAMETER_END)
+                        {
+                            // success
+                            _Wikitext_include_parameter(parser, RSTRING_PTR(parser->link_target), RSTRING_LEN(parser->link_target));
+                            token = NULL;
+                            break;
+                        }
+                        else // unexpected token (syntax error)
+                        {
+                            // rollback
+                            // rb_str_cat(parser->output, literal_param_start, sizeof(literal_param_start) - 1);
+                            rb_str_cat(parser->output, RSTRING_PTR(parser->link_target), RSTRING_LEN(parser->link_target));
+                            // rb_str_cat(parser->output, literal_param_end, sizeof(literal_param_end) - 1);
+                            break;
+                        }
+                    }
+
+                    // jump to top of the loop to process token we scanned during lookahead
+                    parser->link_target = Qnil;
+                    continue;
+                }
+                break;
 
             default:
                 break;

@@ -467,4 +467,8 @@ describe Wikitext::Parser, 'parsing PRE_START/PRE_END blocks' do
   it 'should automatically close open PRE_START blocks on hitting the end-of-file' do
     @parser.parse('<pre>foo').should == "<pre>foo</pre>\n"
   end
+  
+  it 'should allow width tags' do
+    @parser.parse('<pre width>foo</pre>').should == "<pre width=\"100px\">foo</pre>"
+  end
 end

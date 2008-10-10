@@ -88,7 +88,7 @@
             fbreak;
         };
 
-        '<pre>'i
+        /<pre[ A-Za-z]*>/i
         {
             EMIT(PRE_START);
             fbreak;
@@ -373,6 +373,18 @@
             fbreak;
         };
 
+        '{{{'
+        {
+          EMIT(PARAMETER_START);
+          fbreak;
+        };
+        
+        '}}}'
+        {
+          EMIT(PARAMETER_END);
+          fbreak;        
+        };
+        
         '{{'
         {
             EMIT(IMG_START);
